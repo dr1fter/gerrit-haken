@@ -1,6 +1,16 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 
 '''
+gerrit 'ref-update' hook that persists the reflogs for any ref located
+below 'refs/heads'. Persisted reflogs are stored in a commit which is
+referenced by a ref-specific ref: refs/reflogs/<ref> with <ref> being 
+the <ref> part of the respective 'refs/heads/<ref>'.
+
+for the event that previous head-updates were lost or the local reflog was
+altered, a heuristical sanity check is in place. If inconsistencies are
+detected, the last stored state of the reflog is kept and the new local
+reflog is stored as a child commit (thus becoming the new head of 
+refs/reflogs/<ref>)
 
 @author: Christian Cwienk
 '''
@@ -8,10 +18,14 @@
 
 import sys
 import os
+from subprocess import Popen,PIPE
 from os.path import dirname, realpath, join,abspath, exists
 from argparse import ArgumentParser
 
 from git import Repo
+
+REFLOG='reflog'
+REFS_REFLOGS='refs/reflogs'
 
 def cliparser():
     p = ArgumentParser()
@@ -32,22 +46,47 @@ def reflogfile(repodir,ref):
 
 def reflogref(ref):
     #cut off 'refs/heads'
-    return 'refs/reflogs'+ref[10:]
+    return REFS_REFLOGS+ref[10:]
+
+def reflogblobsha(repo,ref):
+    blobline = filter(lambda l:l.endswith(REFLOG),repo.git.cat_file('-p',reflogref(ref)+'^{tree}').split('\n'))
+    assert len(blobline) == 1, 'there must only be one file in ref/reflogs/<ref>/ that ends with "reflog"'
+    blobsha = blobline[0].replace('\t',' ').split(' ')[2].strip()
+    return blobsha
+    
+def tail(repo, blobsha,lines_count=2):
+    gitp = Popen(['git','cat-file','-p',blobsha],cwd=repo.git_dir,stdout=PIPE)
+    tailp= Popen(['tail', '-'+str(lines_count)],stdin=gitp.stdout, stdout=PIPE)
+    stdout,_=tailp.communicate()
+    return stdout
+
+def checkinsanity(repo, reflog_ref, reflogfile):
+    newtail,_= Popen(['tail', '-2', reflogfile],stdout=PIPE).communicate()
+    newtail=newtail.split('\n')
+    oldtail= tail(repo, reflogblobsha(repo,reflog_ref)).split('\n')
+    if len(oldtail) < 1: return True # nothing in the log so far - can't sanity-check
+    if len(newtail) < 2: return False# old log had at least one entry - new log must not be shorter
+    return oldtail[1]!=newtail[0] 
 
 def init_or_update_log(repo, repo_dir, ref, reflog_file):
-    refpath=realpath(join(repo_dir, reflogref(ref), '..'))
+    reflog_ref = reflogref(ref)
+    refpath=realpath(join(repo_dir, reflog_ref, '..'))
+    initial=False
     if not exists(refpath):
       os.makedirs(refpath)
-    file_name = 'reflog'
+      initial=True
+    file_name = REFLOG
+    if not initial: insane=checkinsanity(repo, ref, reflog_file)
+    if insane: p_rev=repo.git.rev_parse(reflog_ref)
     hash = repo.git.hash_object('-w', reflog_file)
     repo.git.update_index('--add', '--cacheinfo', '10644', hash, file_name)
     hash = repo.git.write_tree()
-    hash = repo.git.commit_tree(hash)
-    #replace old commit for now
-    #todo: check for consistency against previous content
-    #      and do a successor commit in this case
-    with open(join(repo_dir,reflogref(ref)),'w') as f:
+    hash = repo.git.commit_tree(hash) if not insane else repo.git.commit_tree(hash, '-p', p_rev ) 
+    #update head
+    with open(join(repo_dir,reflog_ref),'w') as f:
         f.write(hash)
+    #todo: log a warning somewhere?
+    #print 'log was ' + ('insane' if insane else 'sane')
 
 def main(argv=sys.argv[1:]):
     p = cliparser()
