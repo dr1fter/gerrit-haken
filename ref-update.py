@@ -64,8 +64,8 @@ def checkinsanity(repo, reflog_ref, reflogfile):
     newtail,_= Popen(['tail', '-2', reflogfile],stdout=PIPE).communicate()
     newtail=newtail.split('\n')
     oldtail= tail(repo, reflogblobsha(repo,reflog_ref)).split('\n')
-    if len(oldtail) < 1: return True # nothing in the log so far - can't sanity-check
-    if len(newtail) < 2: return False# old log had at least one entry - new log must not be shorter
+    if len(oldtail) < 1: return False # nothing in the log so far - can't sanity-check
+    if len(newtail) < 2: return True# old log had at least one entry - new log must not be shorter
     return oldtail[1]!=newtail[0] 
 
 def init_or_update_log(repo, repo_dir, ref, reflog_file):
@@ -81,12 +81,18 @@ def init_or_update_log(repo, repo_dir, ref, reflog_file):
     hash = repo.git.hash_object('-w', reflog_file)
     repo.git.update_index('--add', '--cacheinfo', '10644', hash, file_name)
     hash = repo.git.write_tree()
-    hash = repo.git.commit_tree(hash) if not insane else repo.git.commit_tree(hash, '-p', p_rev ) 
+    arglist = [hash]
+    if not initial and not insane:
+        #determine parent commit (if any)
+        parent=repo.git.rev_list('--parents','-n1',reflog_ref).strip().split(' ')
+        if len(parent)>1: arglist.extend(['-p', parent[1]])
+    if insane: arglist.extend(['-p',p_rev])
+    hash = repo.git.commit_tree(arglist)
     #update head
     with open(join(repo_dir,reflog_ref),'w') as f:
         f.write(hash)
     #todo: log a warning somewhere?
-    #print 'log was ' + ('insane' if insane else 'sane')
+    print 'log was ' + ('insane' if insane else 'sane')
 
 def main(argv=sys.argv[1:]):
     p = cliparser()
