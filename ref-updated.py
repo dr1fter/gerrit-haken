@@ -31,22 +31,25 @@ def cliparser():
     p = ArgumentParser()
     p.add_argument('--project')
     p.add_argument('--refname')
-    p.add_argument('--uploader')
+    p.add_argument('--submitter')
     p.add_argument('--oldrev')
     p.add_argument('--newrev')
     return p
 
-def repodir(project):
-    #todo: use explicit configuration instead of relying on relative path
-    owndir = dirname(abspath(__file__))
-    return join(owndir, '..', 'git', project+'.git')
+def repodir():
+    return os.environ['GIT_DIR']
 
-def reflogfile(repodir,ref):
-    return join(repodir,'logs', ref)
+def reflogfile(ref):
+    if not ref.startswith('refs/heads'): ref='refs/heads/' + ref
+    return join(repodir(),'logs', ref)
 
 def reflogref(ref):
     #cut off 'refs/heads'
-    return REFS_REFLOGS+ref[10:]
+    return '/'.join([REFS_REFLOGS,branch(ref)])
+
+def branch(ref):
+    #cut off 'refs/heads'
+    return ref[10:] if ref.startswith('refs/heads') else ref
 
 def reflogblobsha(repo,ref):
     blobline = filter(lambda l:l.endswith(REFLOG),repo.git.cat_file('-p',reflogref(ref)+'^{tree}').split('\n'))
@@ -68,13 +71,13 @@ def checkinsanity(repo, reflog_ref, reflogfile):
     if len(newtail) < 2: return True# old log had at least one entry - new log must not be shorter
     return oldtail[1]!=newtail[0] 
 
-def init_or_update_log(repo, repo_dir, ref, reflog_file):
+def init_or_update_log(repo, ref, reflog_file):
     reflog_ref = reflogref(ref)
-    refpath=realpath(join(repo_dir, reflog_ref, '..'))
+    refpath=realpath(join(repodir(), reflog_ref, '..'))
     initial=False
     if not exists(refpath):
       os.makedirs(refpath)
-      initial=True
+    if not exists(join(repodir(), reflog_ref)): initial=True
     file_name = REFLOG
     if not initial: insane=checkinsanity(repo, ref, reflog_file)
     else: insane=False
@@ -82,7 +85,7 @@ def init_or_update_log(repo, repo_dir, ref, reflog_file):
     hash = repo.git.hash_object('-w', reflog_file)
     repo.git.update_index('--add', '--cacheinfo', '10644', hash, file_name)
     hash = repo.git.write_tree()
-    arglist = [hash]
+    arglist = [hash, '-m', 'persist reflog']
     if not initial and not insane:
         #determine parent commit (if any)
         parent=repo.git.rev_list('--parents','-n1',reflog_ref).strip().split(' ')
@@ -90,20 +93,19 @@ def init_or_update_log(repo, repo_dir, ref, reflog_file):
     if insane: arglist.extend(['-p',p_rev])
     hash = repo.git.commit_tree(arglist)
     #update head
-    with open(join(repo_dir,reflog_ref),'w') as f:
+    with open(join(repodir(),reflog_ref),'w') as f:
         f.write(hash)
     #todo: log a warning somewhere?
     print 'log was ' + ('insane' if insane else 'sane')
 
 def main(argv=sys.argv[1:]):
     p = cliparser()
-    parsed_args = p.parse_args(argv)
+    parsed_args,_ = p.parse_known_args(argv)
     refname = parsed_args.refname
-    if not refname.startswith('refs/heads/'): exit(0) #only process refs/heads
-    repo_dir=repodir(parsed_args.project)
-    repo = Repo(repo_dir)
-    reflog_file=reflogfile(repo_dir,refname)
-    init_or_update_log(repo, repo_dir, refname, reflog_file)
+    #if not refname.startswith('refs/heads/'): exit(0) #only process refs/heads
+    repo = Repo(repodir())
+    reflog_file=reflogfile(refname)
+    init_or_update_log(repo, refname, reflog_file)
 
 
 if __name__ == "__main__":
